@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LinearRegression
@@ -12,12 +12,15 @@ from sklearn.metrics import (
     mean_squared_error, r2_score
 )
 from sklearn.cluster import KMeans
+from sklearn.base import clone
 
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+sns.set_style("whitegrid")
 
 # -----------------------------------------------------------------------------
 # Helper functions
@@ -91,26 +94,47 @@ def prepare_regression_data(df, target_col):
     return X, y, feature_cols, X.columns.tolist()
 
 
-def evaluate_classifier(model, X_train, X_test, y_train, y_test, model_name):
-    """Fit a classifier and compute evaluation metrics."""
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-    if hasattr(model, "predict_proba"):
-        y_proba = model.predict_proba(X_test)[:, 1]
-        roc = roc_auc_score(y_test, y_proba)
-    else:
-        y_scores = model.decision_function(X_test)
-        roc = roc_auc_score(y_test, y_scores)
+def crossval_evaluate(model, X, y, model_name, n_splits=5):
+    """5-fold stratified cross-validation evaluation."""
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+    y_true_all = []
+    y_pred_all = []
+    y_score_all = []
+
+    for train_idx, test_idx in skf.split(X, y):
+        X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+        y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+
+        mdl = clone(model)
+        mdl.fit(X_tr, y_tr)
+        y_pred = mdl.predict(X_te)
+        y_true_all.append(y_te)
+        y_pred_all.append(y_pred)
+
+        if hasattr(mdl, "predict_proba"):
+            y_score_all.append(mdl.predict_proba(X_te)[:, 1])
+        else:
+            y_score_all.append(mdl.decision_function(X_te))
+
+    y_true_cat = pd.concat(y_true_all)
+    y_pred_cat = np.concatenate(y_pred_all)
+    y_score_cat = np.concatenate(y_score_all)
 
     metrics = {
         "Model": model_name,
-        "Accuracy": accuracy_score(y_test, y_pred),
-        "Precision": precision_score(y_test, y_pred, zero_division=0),
-        "Recall": recall_score(y_test, y_pred, zero_division=0),
-        "F1-score": f1_score(y_test, y_pred, zero_division=0),
-        "ROC-AUC": roc,
+        "Accuracy": accuracy_score(y_true_cat, y_pred_cat),
+        "Precision": precision_score(y_true_cat, y_pred_cat, zero_division=0),
+        "Recall": recall_score(y_true_cat, y_pred_cat, zero_division=0),
+        "F1-score": f1_score(y_true_cat, y_pred_cat, zero_division=0),
+        "ROC-AUC": roc_auc_score(y_true_cat, y_score_cat),
     }
-    return model, metrics
+
+    # Fit final model on full data for later scoring
+    final_model = clone(model)
+    final_model.fit(X, y)
+
+    return final_model, metrics
 
 
 def run_association_rules(df, multi_cols, min_support=0.05, metric="lift", min_threshold=1.0):
@@ -173,7 +197,6 @@ def summarize_clusters(df):
         Avg_Price=("Price_numeric", "mean")
     )
 
-    # Choose cluster with highest buyer rate as best
     best_cluster = summary["Buyer_Rate"].idxmax()
     return summary, best_cluster
 
@@ -237,7 +260,7 @@ st.markdown(
     """
 Upload your survey data (600+ respondents) and explore:
 
-- **Classification** (Purchase likelihood: Buyer vs Non-buyer)
+- **Classification** (Purchase likelihood: Buyer vs Non-buyer, with 5-fold CV)
 - **Association Rules** (Customer behaviour patterns)
 - **Clustering** (Customer segments and target segment)
 - **Regression** (Price prediction)
@@ -270,75 +293,252 @@ tabs = st.tabs([
 ])
 
 # -----------------------------------------------------------------------------
-# Overview Tab (smaller, cleaner graphs)
+# OVERVIEW TAB – 10 GRAPHS FROM REPORT
 # -----------------------------------------------------------------------------
 with tabs[0]:
-    st.header("📊 Key Survey Insights")
+    st.header("📊 Descriptive Analytics – Key Graphs")
 
-    st.markdown("### 👀 Quick Visual Overview")
+    # Graph 1: Key Demographics (Gender & Location) – Pie Charts
+    st.subheader("Graph 1: Key Demographics (Gender & Location Type)")
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    overview_cols = [
-        "Q1_Age_Group",
-        "Q2_Gender",
-        "Q3_Location_Type",
-        "Q8_Outdoor_Frequency",
-        "Q12_Emergency_Kit",
-        "Q13_Emergency_Importance",
-        "Q23_Solar_Powerbank_Awareness",
-        "Q28_Preferred_Capacity",
-        "Q30_Purchase_Likelihood",
-        "Q31_Max_Price_Willing_To_Pay",
-    ]
-    available_cols = [c for c in overview_cols if c in df.columns]
+    if "Q2_Gender" in df.columns:
+        gender_counts = df["Q2_Gender"].value_counts()
+        axes[0].pie(gender_counts.values, labels=gender_counts.index, autopct="%1.1f%%", startangle=90)
+        axes[0].set_title("Gender Distribution")
+    else:
+        axes[0].text(0.5, 0.5, "Q2_Gender not found", ha="center")
 
-    col_left, col_right = st.columns(2)
+    if "Q3_Location_Type" in df.columns:
+        loc_counts = df["Q3_Location_Type"].value_counts()
+        axes[1].pie(loc_counts.values, labels=loc_counts.index, autopct="%1.1f%%", startangle=90)
+        axes[1].set_title("Location Type Distribution")
+    else:
+        axes[1].text(0.5, 0.5, "Q3_Location_Type not found", ha="center")
 
-    for i, col in enumerate(available_cols):
-        target_col = col_left if i % 2 == 0 else col_right
-        with target_col:
-            st.subheader(col.replace("_", " "))
-            counts = df[col].value_counts()
-            fig, ax = plt.subplots(figsize=(4, 3))
-            sns.barplot(x=counts.values, y=counts.index, ax=ax, palette="viridis")
-            ax.set_xlabel("Count")
-            ax.set_ylabel("")
-            st.pyplot(fig)
+    st.pyplot(fig)
+
+    # Graph 2: Heatmap - Purchase Likelihood vs Age Group
+    st.subheader("Graph 2: Heatmap – Purchase Likelihood vs Age Group")
+    if "Q1_Age_Group" in df.columns and "Q30_Purchase_Likelihood" in df.columns:
+        ct = pd.crosstab(df["Q1_Age_Group"], df["Q30_Purchase_Likelihood"])
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.heatmap(ct, annot=True, fmt="d", cmap="YlOrRd", ax=ax)
+        ax.set_xlabel("Purchase Likelihood")
+        ax.set_ylabel("Age Group")
+        st.pyplot(fig)
+    else:
+        st.info("Required columns Q1_Age_Group and/or Q30_Purchase_Likelihood not found.")
+
+    # Graph 3: Target Income Level Distribution – Vertical Bar
+    st.subheader("Graph 3: Target Income Level Distribution")
+    if "Q4_Annual_Income" in df.columns:
+        income_counts = df["Q4_Annual_Income"].value_counts().sort_index()
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.barplot(x=income_counts.index, y=income_counts.values, ax=ax, palette="viridis")
+        ax.set_xlabel("Annual Income Bracket")
+        ax.set_ylabel("Number of Respondents")
+        plt.xticks(rotation=45, ha="right")
+        st.pyplot(fig)
+    else:
+        st.info("Column Q4_Annual_Income not found.")
+
+    # Graph 4: Preferred Power Bank Capacity – Vertical Bar
+    st.subheader("Graph 4: Preferred Power Bank Capacity")
+    if "Q28_Preferred_Capacity" in df.columns:
+        cap_counts = df["Q28_Preferred_Capacity"].value_counts().sort_index()
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.barplot(x=cap_counts.index, y=cap_counts.values, ax=ax, palette="viridis")
+        ax.set_xlabel("Preferred Capacity (mAh range)")
+        ax.set_ylabel("Number of Respondents")
+        plt.xticks(rotation=45, ha="right")
+        st.pyplot(fig)
+    else:
+        st.info("Column Q28_Preferred_Capacity not found.")
+
+    # Graph 5: Preferred Purchase Channels – Horizontal Bar + Top 3
+    st.subheader("Graph 5: Preferred Purchase Channels")
+    if "Q29_Purchase_Channels" in df.columns:
+        temp = df["Q29_Purchase_Channels"].dropna().astype(str).str.split("|").explode().str.strip()
+        channel_counts = temp.value_counts()
+        total = channel_counts.sum()
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.barplot(x=channel_counts.values, y=channel_counts.index, ax=ax, palette="viridis")
+        ax.set_xlabel("Number of Mentions")
+        ax.set_ylabel("Purchase Channel")
+        st.pyplot(fig)
+
+        # Medal podium (Top 3)
+        st.markdown("#### 🥇 Top 3 Purchase Channels")
+        for i, (ch, cnt) in enumerate(channel_counts.head(3).items(), start=1):
+            medal = "🥇" if i == 1 else ("🥈" if i == 2 else "🥉")
+            pct = (cnt / total) * 100 if total > 0 else 0
+            st.markdown(f"{medal} **{ch}** – {cnt} mentions ({pct:.1f}%)")
+    else:
+        st.info("Column Q29_Purchase_Channels not found.")
+
+    # Graph 6: Most Popular Bundle Preferences – Horizontal Bar + Top 3
+    st.subheader("Graph 6: Most Popular Bundle Preferences")
+    if "Q32_Bundle_Preferences" in df.columns:
+        temp = df["Q32_Bundle_Preferences"].dropna().astype(str).str.split("|").explode().str.strip()
+        bundle_counts = temp.value_counts()
+        total_b = bundle_counts.sum()
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.barplot(x=bundle_counts.values, y=bundle_counts.index, ax=ax, palette="viridis")
+        ax.set_xlabel("Number of Mentions")
+        ax.set_ylabel("Bundle Type")
+        st.pyplot(fig)
+
+        st.markdown("#### 🥇 Top 3 Bundles")
+        for i, (bndl, cnt) in enumerate(bundle_counts.head(3).items(), start=1):
+            medal = "🥇" if i == 1 else ("🥈" if i == 2 else "🥉")
+            pct = (cnt / total_b) * 100 if total_b > 0 else 0
+            st.markdown(f"{medal} **{bndl}** – {cnt} mentions ({pct:.1f}%)")
+    else:
+        st.info("Column Q32_Bundle_Preferences not found.")
+
+    # Graph 7: Heatmap – Top Features vs Primary Use Case
+    st.subheader("Graph 7: Heatmap – Top Features vs Primary Use Case")
+    if "Q25_Important_Features" in df.columns and "Q26_Primary_Use_Case" in df.columns:
+        df_feat = df[["Q25_Important_Features", "Q26_Primary_Use_Case"]].dropna()
+        all_features = (
+            df_feat["Q25_Important_Features"]
+            .astype(str)
+            .str.split("|")
+            .explode()
+            .str.strip()
+        )
+        top5_features = all_features.value_counts().head(5).index
+
+        use_cases = df_feat["Q26_Primary_Use_Case"].dropna().unique()
+        heat_data = pd.DataFrame(0, index=top5_features, columns=use_cases)
+
+        for _, row in df_feat.iterrows():
+            feats = [f.strip() for f in str(row["Q25_Important_Features"]).split("|") if f.strip()]
+            uc = row["Q26_Primary_Use_Case"]
+            for f in feats:
+                if f in top5_features:
+                    heat_data.loc[f, uc] += 1
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.heatmap(heat_data, annot=True, cmap="YlGnBu", fmt="d", ax=ax)
+        ax.set_xlabel("Primary Use Case")
+        ax.set_ylabel("Top Features")
+        st.pyplot(fig)
+    else:
+        st.info("Columns Q25_Important_Features and/or Q26_Primary_Use_Case not found.")
+
+    # Graph 8: Employment Status vs Price Willingness – Boxplot
+    st.subheader("Graph 8: Employment Status vs Willingness to Pay (Boxplot)")
+    if "Q6_Employment_Status" in df.columns and "Price_numeric" in df.columns:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.boxplot(x="Q6_Employment_Status", y="Price_numeric", data=df, ax=ax)
+        ax.set_xlabel("Employment Status")
+        ax.set_ylabel("Max Price Willing to Pay (USD)")
+        plt.xticks(rotation=45, ha="right")
+        st.pyplot(fig)
+    else:
+        st.info("Columns Q6_Employment_Status and/or Price_numeric not found.")
+
+    # Graph 9: Household Size vs Bundle Preference – Grouped Bar Chart
+    st.subheader("Graph 9: Household Size vs Top Bundle Preferences")
+    if "Q36_Household_Size" in df.columns and "Q32_Bundle_Preferences" in df.columns:
+        temp = df[["Q36_Household_Size", "Q32_Bundle_Preferences"]].dropna()
+        temp = temp.assign(Bundle=temp["Q32_Bundle_Preferences"].astype(str).str.split("|")).explode("Bundle")
+        temp["Bundle"] = temp["Bundle"].str.strip()
+        top5_bundles = temp["Bundle"].value_counts().head(5).index
+        temp = temp[temp["Bundle"].isin(top5_bundles)]
+
+        pivot = pd.pivot_table(
+            temp,
+            index="Q36_Household_Size",
+            columns="Bundle",
+            aggfunc="size",
+            fill_value=0
+        )
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        pivot.plot(kind="bar", ax=ax)
+        ax.set_xlabel("Household Size")
+        ax.set_ylabel("Number of Mentions")
+        plt.xticks(rotation=0)
+        st.pyplot(fig)
+    else:
+        st.info("Columns Q36_Household_Size and/or Q32_Bundle_Preferences not found.")
+
+    # Graph 10: Gender vs Feature Preferences – Butterfly Chart
+    st.subheader("Graph 10: Gender vs Feature Preferences (Butterfly Chart)")
+    if "Q2_Gender" in df.columns and "Q25_Important_Features" in df.columns:
+        temp = df[["Q2_Gender", "Q25_Important_Features"]].dropna()
+        temp = temp.assign(Feature=temp["Q25_Important_Features"].astype(str).str.split("|")).explode("Feature")
+        temp["Feature"] = temp["Feature"].str.strip()
+
+        # focus on Male/Female
+        temp = temp[temp["Q2_Gender"].isin(["Male", "Female"])]
+        overall_top = temp["Feature"].value_counts().head(10).index
+
+        gender_feat = (
+            temp[temp["Feature"].isin(overall_top)]
+            .groupby(["Feature", "Q2_Gender"])
+            .size()
+            .unstack(fill_value=0)
+        )
+
+        # Ensure both columns exist
+        for g in ["Male", "Female"]:
+            if g not in gender_feat.columns:
+                gender_feat[g] = 0
+
+        gender_feat = gender_feat.loc[overall_top]  # keep order
+
+        male_counts = gender_feat["Male"].values
+        female_counts = gender_feat["Female"].values
+
+        y = np.arange(len(overall_top))
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.barh(y, male_counts, color="#1f77b4", label="Male")
+        ax.barh(y, -female_counts, color="#ff7f0e", label="Female")
+        ax.set_yticks(y)
+        ax.set_yticklabels(overall_top)
+        ax.axvline(0, color="black")
+        ax.set_xlabel("Mentions (Male right / Female left)")
+        ax.legend()
+        st.pyplot(fig)
+    else:
+        st.info("Columns Q2_Gender and/or Q25_Important_Features not found.")
 
 # -----------------------------------------------------------------------------
-# Classification Tab
+# Classification Tab – 5-FOLD CROSS-VALIDATION
 # -----------------------------------------------------------------------------
 with tabs[1]:
-    st.header("🤖 Classification: Purchase Likelihood (Buyer vs Non-buyer)")
+    st.header("🤖 Classification: Purchase Likelihood (Buyer vs Non-buyer with 5-fold CV)")
 
     if buyer_col is None or df[buyer_col].isna().all():
         st.warning("Buyer target could not be created from Q30_Purchase_Likelihood. Check data values.")
     else:
         X_cls, y_cls, cls_features, cls_encoded_cols = prepare_classification_data(df, buyer_col)
 
-        test_size = st.slider("Test size (for train/test split)", 0.1, 0.4, 0.2, step=0.05)
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_cls, y_cls, test_size=test_size, random_state=42, stratify=y_cls
-        )
-
-        # Train models
-        dt_model, dt_metrics = evaluate_classifier(
+        # 5-fold CV for each model
+        dt_model, dt_metrics = crossval_evaluate(
             DecisionTreeClassifier(max_depth=5, random_state=42),
-            X_train, X_test, y_train, y_test,
-            "Decision Tree",
+            X_cls, y_cls,
+            "Decision Tree (5-fold CV)"
         )
-        rf_model, rf_metrics = evaluate_classifier(
+        rf_model, rf_metrics = crossval_evaluate(
             RandomForestClassifier(n_estimators=200, random_state=42),
-            X_train, X_test, y_train, y_test,
-            "Random Forest",
+            X_cls, y_cls,
+            "Random Forest (5-fold CV)"
         )
-        gb_model, gb_metrics = evaluate_classifier(
+        gb_model, gb_metrics = crossval_evaluate(
             GradientBoostingClassifier(random_state=42),
-            X_train, X_test, y_train, y_test,
-            "Gradient Boosting",
+            X_cls, y_cls,
+            "Gradient Boosting (5-fold CV)"
         )
 
         metrics_df = pd.DataFrame([dt_metrics, rf_metrics, gb_metrics])
-        st.subheader("📋 Model Performance Comparison")
+        st.subheader("📋 Cross-Validated Model Performance (5 folds)")
         st.dataframe(metrics_df.style.format({
             "Accuracy": "{:.3f}",
             "Precision": "{:.3f}",
@@ -347,7 +547,7 @@ with tabs[1]:
             "ROC-AUC": "{:.3f}",
         }))
 
-        # REAL customer preference importance (from survey responses)
+        # Real customer preference importance from survey responses
         st.subheader("⭐ What Features Do Customers Prefer? (Survey-based Importance)")
         pref_series = compute_preference_importance(df)
         if pref_series is not None:
@@ -361,11 +561,11 @@ with tabs[1]:
         else:
             st.info("Could not compute preferences (check Q25, Q28, Q34, Q35).")
 
-        # Optional: ML feature importance under expander
+        # Optional technical ML feature importance
         with st.expander("🔍 Model Feature Importance (Random Forest – technical view)"):
             importances = rf_model.feature_importances_
             fi_df = pd.DataFrame({
-                "Feature": X_train.columns,
+                "Feature": X_cls.columns,
                 "Importance": importances,
             }).sort_values(by="Importance", ascending=False).head(20)
 
@@ -375,8 +575,8 @@ with tabs[1]:
             st.pyplot(fig)
 
         st.markdown(
-            "The **Random Forest** model above will also be used for scoring new customers "
-            "in the **Score New Customers** tab."
+            "The **Random Forest** model above (trained with 5-fold CV and then on full data) "
+            "will be used for scoring new customers in the **Score New Customers** tab."
         )
 
 # -----------------------------------------------------------------------------
