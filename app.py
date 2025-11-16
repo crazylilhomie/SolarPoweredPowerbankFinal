@@ -66,7 +66,7 @@ def create_price_numeric(df):
 
 
 def prepare_classification_data(df, target_col):
-    """Prepare X, y for classification."""
+    """Prepare X, y for classification using all Q-columns except Q30."""
     q_cols = [c for c in df.columns if c.startswith("Q")]
     feature_cols = [c for c in q_cols if c != "Q30_Purchase_Likelihood"]
     df_model = df.dropna(subset=[target_col]).copy()
@@ -79,7 +79,7 @@ def prepare_classification_data(df, target_col):
 
 
 def prepare_regression_data(df, target_col):
-    """Prepare X, y for regression."""
+    """Prepare X, y for regression using all Q-columns except Q31."""
     q_cols = [c for c in df.columns if c.startswith("Q")]
     feature_cols = [c for c in q_cols if c != "Q31_Max_Price_Willing_To_Pay"]
     df_model = df.dropna(subset=[target_col]).copy()
@@ -92,6 +92,7 @@ def prepare_regression_data(df, target_col):
 
 
 def evaluate_classifier(model, X_train, X_test, y_train, y_test, model_name):
+    """Fit a classifier and compute evaluation metrics."""
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     if hasattr(model, "predict_proba"):
@@ -101,7 +102,7 @@ def evaluate_classifier(model, X_train, X_test, y_train, y_test, model_name):
         y_scores = model.decision_function(X_test)
         roc = roc_auc_score(y_test, y_scores)
 
-    return model, {
+    metrics = {
         "Model": model_name,
         "Accuracy": accuracy_score(y_test, y_pred),
         "Precision": precision_score(y_test, y_pred, zero_division=0),
@@ -109,16 +110,22 @@ def evaluate_classifier(model, X_train, X_test, y_train, y_test, model_name):
         "F1-score": f1_score(y_test, y_pred, zero_division=0),
         "ROC-AUC": roc,
     }
+    return model, metrics
 
 
 def run_association_rules(df, multi_cols, min_support=0.05, metric="lift", min_threshold=1.0):
-    """Run Apriori on multi-select questions separated by |."""
+    """
+    Run Apriori association rules on selected multi-select questions.
+    Multi-select answers are assumed to be separated by '|'.
+    """
     transactions = []
     for _, row in df[multi_cols].iterrows():
         basket = []
         for col in multi_cols:
             val = row[col]
-            if isinstance(val, str):
+            if pd.isna(val):
+                continue
+            if isinstance(val, str) and val.strip() != "":
                 parts = [p.strip() for p in val.split("|") if p.strip()]
                 for p in parts:
                     basket.append(f"{col}: {p}")
@@ -129,8 +136,8 @@ def run_association_rules(df, multi_cols, min_support=0.05, metric="lift", min_t
         return None, None
 
     te = TransactionEncoder()
-    te_array = te.fit(transactions).transform(transactions)
-    trans_df = pd.DataFrame(te_array, columns=te.columns_)
+    te_ary = te.fit(transactions).transform(transactions)
+    trans_df = pd.DataFrame(te_ary, columns=te.columns_)
 
     frequent = apriori(trans_df, min_support=min_support, use_colnames=True)
     if frequent.empty:
@@ -144,30 +151,19 @@ def run_association_rules(df, multi_cols, min_support=0.05, metric="lift", min_t
     return trans_df, rules
 
 
-def run_clustering(df):
-    cluster_vars = [
-        "Q1_Age_Group", "Q2_Gender", "Q3_Location_Type", "Q4_Annual_Income",
-        "Q5_Education_Level", "Q6_Employment_Status", "Q7_Occupation_Category",
-        "Q8_Outdoor_Frequency", "Q10_Camping_Frequency", "Q13_Emergency_Importance",
-        "Q14_Travel_Frequency", "Q16_Sustainability_Importance", "Q17_Tech_Relationship",
-        "Q19_Powerbank_Ownership", "Q21_Power_Issues_Frequency"
-    ]
+def prepare_clustering_matrix(df, cluster_vars):
+    """Prepare data matrix for clustering (K-Means) from given variables."""
     existing = [c for c in cluster_vars if c in df.columns]
+    if not existing:
+        return None, None
 
     df_cluster = df.dropna(subset=existing).copy()
     X_cluster = pd.get_dummies(df_cluster[existing], drop_first=True)
-
-    n_clusters = st.sidebar.slider("Number of clusters (K)", 3, 10, 4)
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    df_cluster["Cluster"] = kmeans.fit_predict(X_cluster)
-
-    df = df.copy()
-    df["Cluster"] = df_cluster["Cluster"]
-
-    return df, df_cluster, kmeans
+    return df_cluster, X_cluster
 
 
 def summarize_clusters(df):
+    """Summarize clusters with buyer rate and average price."""
     if "Cluster" not in df.columns:
         return None, None
 
@@ -177,190 +173,442 @@ def summarize_clusters(df):
         Avg_Price=("Price_numeric", "mean")
     )
 
+    # Choose cluster with highest buyer rate as best
     best_cluster = summary["Buyer_Rate"].idxmax()
     return summary, best_cluster
 
 
 def recommend_price(df):
+    """
+    Recommend final price based on buyers' willingness to pay (Price_numeric)
+    among respondents classified as Buyer = 1.
+    """
+    if "Buyer" not in df.columns or "Price_numeric" not in df.columns:
+        return None
     buyers = df[(df["Buyer"] == 1) & df["Price_numeric"].notna()]
     if buyers.empty:
         return None
     median_price = buyers["Price_numeric"].median()
-    return int(5 * round(median_price / 5))
+    recommended = int(5 * round(median_price / 5))  # round to nearest 5
+    return recommended
+
+
+def compute_preference_importance(df):
+    """
+    Compute 'real' feature importance as frequency of preferences in:
+    Q25_Important_Features, Q28_Preferred_Capacity, Q34_Purchase_Motivators, Q35_Trusted_Brands
+    """
+    pref_cols = [
+        "Q25_Important_Features",
+        "Q28_Preferred_Capacity",
+        "Q34_Purchase_Motivators",
+        "Q35_Trusted_Brands"
+    ]
+    all_prefs = []
+
+    for col in pref_cols:
+        if col in df.columns:
+            items = (
+                df[col]
+                .dropna()
+                .astype(str)
+                .str.split("|")
+                .explode()
+                .str.strip()
+            )
+            all_prefs.extend(items.tolist())
+
+    if not all_prefs:
+        return None
+
+    pref_series = pd.Series(all_prefs).value_counts()
+    return pref_series
 
 
 # -----------------------------------------------------------------------------
 # Streamlit App
 # -----------------------------------------------------------------------------
 
-st.set_page_config(page_title="Solar Power Bank Dashboard", layout="wide")
+st.set_page_config(page_title="Solar Power Bank Launch Analytics Dashboard", layout="wide")
+
 st.title("🔋 Solar Power Bank Launch Analytics Dashboard")
 
-uploaded = st.file_uploader("Upload your survey CSV", type=["csv"])
-if uploaded is None:
+st.markdown(
+    """
+Upload your survey data (600+ respondents) and explore:
+
+- **Classification** (Purchase likelihood: Buyer vs Non-buyer)
+- **Association Rules** (Customer behaviour patterns)
+- **Clustering** (Customer segments and target segment)
+- **Regression** (Price prediction)
+- **Scenario Scoring** (Label new customers)
+"""
+)
+
+uploaded_file = st.file_uploader("Upload your survey CSV file", type=["csv"])
+
+if uploaded_file is None:
+    st.info("👆 Please upload the survey CSV file to begin.")
     st.stop()
 
-df = pd.read_csv(uploaded)
-st.success(f"Data Loaded: {df.shape[0]} rows")
+# Load data
+df = pd.read_csv(uploaded_file)
+st.success(f"Data loaded successfully! Shape: {df.shape[0]} rows × {df.shape[1]} columns")
 
+# Create target variables
 df, buyer_col = create_buyer_flag(df)
 df, price_col = create_price_numeric(df)
 
-tabs = st.tabs(["📊 Overview", "🤖 Classification", "📎 Association Rules",
-                "👥 Clustering", "💵 Regression", "🧪 Score Customers"])
+# Tabs
+tabs = st.tabs([
+    "📊 Overview",
+    "🤖 Classification",
+    "📎 Association Rules",
+    "👥 Clustering",
+    "💵 Price Regression",
+    "🧪 Score New Customers",
+])
 
 # -----------------------------------------------------------------------------
-# Overview
+# Overview Tab (smaller, cleaner graphs)
 # -----------------------------------------------------------------------------
 with tabs[0]:
-    st.header("📊 Overview")
+    st.header("📊 Key Survey Insights")
+
+    st.markdown("### 👀 Quick Visual Overview")
+
     overview_cols = [
-        "Q1_Age_Group", "Q2_Gender", "Q3_Location_Type", "Q8_Outdoor_Frequency",
-        "Q12_Emergency_Kit", "Q13_Emergency_Importance", "Q23_Solar_Powerbank_Awareness",
-        "Q28_Preferred_Capacity", "Q30_Purchase_Likelihood", "Q31_Max_Price_Willing_To_Pay"
+        "Q1_Age_Group",
+        "Q2_Gender",
+        "Q3_Location_Type",
+        "Q8_Outdoor_Frequency",
+        "Q12_Emergency_Kit",
+        "Q13_Emergency_Importance",
+        "Q23_Solar_Powerbank_Awareness",
+        "Q28_Preferred_Capacity",
+        "Q30_Purchase_Likelihood",
+        "Q31_Max_Price_Willing_To_Pay",
     ]
-    for col in overview_cols:
-        if col in df.columns:
-            st.subheader(col)
-            fig, ax = plt.subplots()
-            sns.countplot(x=df[col], order=df[col].value_counts().index, ax=ax)
-            plt.xticks(rotation=45)
+    available_cols = [c for c in overview_cols if c in df.columns]
+
+    col_left, col_right = st.columns(2)
+
+    for i, col in enumerate(available_cols):
+        target_col = col_left if i % 2 == 0 else col_right
+        with target_col:
+            st.subheader(col.replace("_", " "))
+            counts = df[col].value_counts()
+            fig, ax = plt.subplots(figsize=(4, 3))
+            sns.barplot(x=counts.values, y=counts.index, ax=ax, palette="viridis")
+            ax.set_xlabel("Count")
+            ax.set_ylabel("")
             st.pyplot(fig)
 
 # -----------------------------------------------------------------------------
-# Classification
+# Classification Tab
 # -----------------------------------------------------------------------------
 with tabs[1]:
-    st.header("🤖 Classification – Buyer Prediction")
+    st.header("🤖 Classification: Purchase Likelihood (Buyer vs Non-buyer)")
 
-    X, y, _, _ = prepare_classification_data(df, "Buyer")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
-    )
+    if buyer_col is None or df[buyer_col].isna().all():
+        st.warning("Buyer target could not be created from Q30_Purchase_Likelihood. Check data values.")
+    else:
+        X_cls, y_cls, cls_features, cls_encoded_cols = prepare_classification_data(df, buyer_col)
 
-    models = [
-        (DecisionTreeClassifier(max_depth=5, random_state=42), "Decision Tree"),
-        (RandomForestClassifier(n_estimators=200, random_state=42), "Random Forest"),
-        (GradientBoostingClassifier(random_state=42), "Gradient Boosting")
-    ]
+        test_size = st.slider("Test size (for train/test split)", 0.1, 0.4, 0.2, step=0.05)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_cls, y_cls, test_size=test_size, random_state=42, stratify=y_cls
+        )
 
-    results = []
-    for model, name in models:
-        m, metrics = evaluate_classifier(model, X_train, X_test, y_train, y_test, name)
-        results.append(metrics)
-        if name == "Random Forest":
-            rf_model = m
+        # Train models
+        dt_model, dt_metrics = evaluate_classifier(
+            DecisionTreeClassifier(max_depth=5, random_state=42),
+            X_train, X_test, y_train, y_test,
+            "Decision Tree",
+        )
+        rf_model, rf_metrics = evaluate_classifier(
+            RandomForestClassifier(n_estimators=200, random_state=42),
+            X_train, X_test, y_train, y_test,
+            "Random Forest",
+        )
+        gb_model, gb_metrics = evaluate_classifier(
+            GradientBoostingClassifier(random_state=42),
+            X_train, X_test, y_train, y_test,
+            "Gradient Boosting",
+        )
 
-    st.subheader("Model Performance")
-    st.dataframe(pd.DataFrame(results))
+        metrics_df = pd.DataFrame([dt_metrics, rf_metrics, gb_metrics])
+        st.subheader("📋 Model Performance Comparison")
+        st.dataframe(metrics_df.style.format({
+            "Accuracy": "{:.3f}",
+            "Precision": "{:.3f}",
+            "Recall": "{:.3f}",
+            "F1-score": "{:.3f}",
+            "ROC-AUC": "{:.3f}",
+        }))
 
-    st.subheader("Feature Importance (Random Forest)")
-    fi = pd.DataFrame({
-        "Feature": X_train.columns,
-        "Importance": rf_model.feature_importances_
-    }).sort_values("Importance", ascending=False).head(20)
+        # REAL customer preference importance (from survey responses)
+        st.subheader("⭐ What Features Do Customers Prefer? (Survey-based Importance)")
+        pref_series = compute_preference_importance(df)
+        if pref_series is not None:
+            top_prefs = pref_series.head(20)
+            fig, ax = plt.subplots(figsize=(8, 6))
+            sns.barplot(x=top_prefs.values, y=top_prefs.index, palette="viridis", ax=ax)
+            ax.set_xlabel("Number of Mentions in Survey")
+            ax.set_ylabel("")
+            ax.set_title("Top 20 Preferred Features / Motivators / Brands")
+            st.pyplot(fig)
+        else:
+            st.info("Could not compute preferences (check Q25, Q28, Q34, Q35).")
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    sns.barplot(data=fi, x="Importance", y="Feature", ax=ax)
-    st.pyplot(fig)
+        # Optional: ML feature importance under expander
+        with st.expander("🔍 Model Feature Importance (Random Forest – technical view)"):
+            importances = rf_model.feature_importances_
+            fi_df = pd.DataFrame({
+                "Feature": X_train.columns,
+                "Importance": importances,
+            }).sort_values(by="Importance", ascending=False).head(20)
+
+            fig, ax = plt.subplots(figsize=(8, 6))
+            sns.barplot(data=fi_df, x="Importance", y="Feature", ax=ax)
+            ax.set_title("Top 20 Features Driving the Model")
+            st.pyplot(fig)
+
+        st.markdown(
+            "The **Random Forest** model above will also be used for scoring new customers "
+            "in the **Score New Customers** tab."
+        )
 
 # -----------------------------------------------------------------------------
-# Association Rules
+# Association Rules Tab – Simplified Insights
 # -----------------------------------------------------------------------------
 with tabs[2]:
-    st.header("📎 Association Rule Mining")
+    st.header("📎 Simple Customer Pattern Insights (Association Rules)")
 
     multi_cols = [
-        "Q9_Outdoor_Activities", "Q11_Camping_Type", "Q18_Portable_Devices",
-        "Q22_Charging_Challenges", "Q25_Important_Features", "Q27_Concerns",
-        "Q29_Purchase_Channels", "Q32_Bundle_Preferences",
-        "Q34_Purchase_Motivators", "Q35_Trusted_Brands"
+        "Q9_Outdoor_Activities",
+        "Q11_Camping_Type",
+        "Q18_Portable_Devices",
+        "Q22_Charging_Challenges",
+        "Q25_Important_Features",
+        "Q27_Concerns",
+        "Q29_Purchase_Channels",
+        "Q32_Bundle_Preferences",
+        "Q34_Purchase_Motivators",
+        "Q35_Trusted_Brands",
     ]
     multi_cols = [c for c in multi_cols if c in df.columns]
 
-    min_support = st.slider("Minimum support", 0.01, 0.2, 0.05)
-    min_lift = st.slider("Minimum lift", 0.5, 3.0, 1.0)
-
-    _, rules = run_association_rules(df, multi_cols, min_support, "lift", min_lift)
-
-    if rules is not None:
-        st.subheader("Top 10 Association Rules")
-        top10 = rules.head(10).copy()
-        top10["antecedents"] = top10["antecedents"].apply(lambda x: ", ".join(list(x)))
-        top10["consequents"] = top10["consequents"].apply(lambda x: ", ".join(list(x)))
-        st.dataframe(top10)
+    if not multi_cols:
+        st.warning("No multi-select questions found in data for association rules.")
     else:
-        st.warning("No rules found at selected thresholds.")
+        st.markdown(f"Using multi-select questions: {', '.join(multi_cols)}")
+
+        min_support = st.slider("Minimum support", 0.01, 0.2, 0.05, step=0.01)
+        min_lift = st.slider("Minimum lift", 0.8, 3.0, 1.0, step=0.1)
+
+        trans_df, rules = run_association_rules(df, multi_cols, min_support=min_support, metric="lift", min_threshold=min_lift)
+
+        if rules is None or rules.empty:
+            st.warning("No association rules found with current thresholds. Try lowering minimum support/lift.")
+        else:
+            st.subheader("🧠 Top 10 Easy-to-Understand Insights")
+
+            simple_rules = []
+            for _, row in rules.head(10).iterrows():
+                A = ", ".join(list(row["antecedents"]))
+                C = ", ".join(list(row["consequents"]))
+                conf = round(row["confidence"] * 100, 1)
+                lift = round(row["lift"], 2)
+                text = (
+                    f"**People who chose _{A}_ also often chose _{C}_** "
+                    f"(confidence: {conf}%, lift: {lift})"
+                )
+                simple_rules.append(text)
+
+            for s in simple_rules:
+                st.markdown(f"✔️ {s}")
+
+            with st.expander("📋 See raw rule table (advanced)"):
+                display_cols = ["antecedents", "consequents", "support", "confidence", "lift"]
+                rules_display = rules[display_cols].copy()
+                rules_display["antecedents"] = rules_display["antecedents"].apply(lambda x: ", ".join(list(x)))
+                rules_display["consequents"] = rules_display["consequents"].apply(lambda x: ", ".join(list(x)))
+                st.dataframe(rules_display)
 
 # -----------------------------------------------------------------------------
-# Clustering
+# Clustering Tab – Elbow + Simple Demographics
 # -----------------------------------------------------------------------------
 with tabs[3]:
-    st.header("👥 Customer Segmentation")
+    st.header("👥 Customer Segmentation (K-Means)")
 
-    df_clustered, df_cluster_only, kmeans = run_clustering(df)
-    summary, best_cluster = summarize_clusters(df_clustered)
+    cluster_vars = [
+        "Q1_Age_Group",
+        "Q2_Gender",
+        "Q3_Location_Type",
+        "Q4_Annual_Income",
+        "Q5_Education_Level",
+        "Q6_Employment_Status",
+        "Q7_Occupation_Category",
+        "Q8_Outdoor_Frequency",
+        "Q10_Camping_Frequency",
+        "Q13_Emergency_Importance",
+        "Q14_Travel_Frequency",
+        "Q16_Sustainability_Importance",
+        "Q17_Tech_Relationship",
+        "Q19_Powerbank_Ownership",
+        "Q21_Power_Issues_Frequency",
+    ]
 
-    st.subheader("Cluster Summary")
-    st.dataframe(summary)
+    df_cluster, X_cluster = prepare_clustering_matrix(df, cluster_vars)
 
-    st.markdown(f"### 🎯 Best Target Cluster: **Cluster {best_cluster}**")
+    if df_cluster is None:
+        st.warning("Clustering variables not found or insufficient data.")
+    else:
+        st.subheader("📉 Elbow Method – Choose Number of Clusters")
 
-    fig, ax = plt.subplots()
-    sns.countplot(x=df_clustered["Cluster"], ax=ax)
-    st.pyplot(fig)
+        sse = []
+        K_range = range(2, 9)
+        for k in K_range:
+            km = KMeans(n_clusters=k, random_state=42, n_init=10)
+            km.fit(X_cluster)
+            sse.append(km.inertia_)
+
+        fig, ax = plt.subplots()
+        ax.plot(K_range, sse, marker="o")
+        ax.set_xlabel("Number of clusters (K)")
+        ax.set_ylabel("SSE (Within-cluster sum of squares)")
+        ax.set_title("Elbow Plot for K-Means")
+        st.pyplot(fig)
+
+        k_choice = st.slider("Select number of clusters for segmentation", 2, 8, 4)
+
+        kmeans = KMeans(n_clusters=k_choice, random_state=42, n_init=10)
+        df_cluster["Cluster"] = kmeans.fit_predict(X_cluster)
+
+        # Merge cluster labels back into main df by index
+        df = df.copy()
+        df["Cluster"] = df_cluster["Cluster"]
+
+        st.subheader("Cluster Performance Summary")
+        cluster_summary, best_cluster = summarize_clusters(df)
+        st.dataframe(cluster_summary)
+
+        st.markdown(f"### 🎯 Recommended Early-Target Cluster: **Cluster {best_cluster}**")
+
+        st.markdown(
+            "This cluster has the **highest buyer rate** (proportion of Buyer = 1), "
+            "so it is statistically the easiest early-win target segment."
+        )
+
+        st.subheader("📌 Cluster Demographics (Most Common Values)")
+        demo_cols = ["Q1_Age_Group", "Q2_Gender", "Q3_Location_Type"]
+        existing_demo = [c for c in demo_cols if c in df.columns]
+
+        if existing_demo:
+            demo_summary = df.groupby("Cluster")[existing_demo].agg(
+                lambda x: x.value_counts().index[0] if not x.value_counts().empty else None
+            )
+            st.dataframe(demo_summary)
+        else:
+            st.info("No demographic columns found to summarize.")
+
+        st.subheader("Cluster Size Distribution")
+        fig, ax = plt.subplots()
+        sns.countplot(x=df["Cluster"], ax=ax)
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("Number of customers")
+        st.pyplot(fig)
 
 # -----------------------------------------------------------------------------
-# Regression
+# Regression Tab
 # -----------------------------------------------------------------------------
 with tabs[4]:
-    st.header("💵 Price Prediction")
+    st.header("💵 Price Prediction (Linear Regression on Q31_Max_Price_Willing_To_Pay)")
 
-    Xr, yr, _, _ = prepare_regression_data(df, "Price_numeric")
-    X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(
-        Xr, yr, test_size=0.2, random_state=42
-    )
+    if price_col is None or df[price_col].isna().all():
+        st.warning("Price_numeric could not be created from Q31_Max_Price_Willing_To_Pay. Check data values.")
+    else:
+        X_reg, y_reg, reg_features, reg_encoded_cols = prepare_regression_data(df, price_col)
+        X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(
+            X_reg, y_reg, test_size=0.2, random_state=42
+        )
 
-    reg = LinearRegression().fit(X_train_r, y_train_r)
-    y_pred_r = reg.predict(X_test_r)
+        reg_model = LinearRegression()
+        reg_model.fit(X_train_r, y_train_r)
 
-    st.write(f"MAE: {mean_absolute_error(y_test_r, y_pred_r):.2f}")
-    st.write(f"RMSE: {np.sqrt(mean_squared_error(y_test_r, y_pred_r)):.2f}")
-    st.write(f"R²: {r2_score(y_test_r, y_pred_r):.3f}")
+        y_pred_r = reg_model.predict(X_test_r)
 
-    rec_price = recommend_price(df)
-    if rec_price:
-        st.subheader(f"🎯 Recommended Launch Price: **${rec_price}**")
+        mae = mean_absolute_error(y_test_r, y_pred_r)
+        mse = mean_squared_error(y_test_r, y_pred_r)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_test_r, y_pred_r)
+
+        st.subheader("📋 Regression Performance")
+        st.write(f"**MAE:** {mae:.2f}")
+        st.write(f"**RMSE:** {rmse:.2f}")
+        st.write(f"**R²:** {r2:.3f}")
+
+        recommended = recommend_price(df)
+        if recommended is not None:
+            st.subheader("🎯 Recommended Product Price")
+            st.write(
+                f"Based on the **median willingness to pay** of respondents who are likely buyers, "
+                f"a suggested launch price is **${recommended}**."
+            )
+        else:
+            st.info("Could not compute recommended price (no buyer or price info).")
 
 # -----------------------------------------------------------------------------
-# Score New Customers
+# Score New Customers Tab
 # -----------------------------------------------------------------------------
 with tabs[5]:
-    st.header("🧪 Score New Customers")
+    st.header("🧪 Score New Customers (Will They Buy?)")
 
-    new = st.file_uploader("Upload new customer CSV", type=["csv"], key="score_csv")
+    if buyer_col is None or df[buyer_col].isna().all():
+        st.warning("Classification models are not available because Buyer target could not be created.")
+    else:
+        st.markdown(
+            """
+Upload a CSV with the same question columns (Q1_Age_Group to Q39_Disaster_Experience)
+for new or expected customers.
 
-    if new:
-        new_df = pd.read_csv(new)
+The app will use the trained **Random Forest** classifier to label each row as:
 
-        # Same preprocessing as training
-        q_cols = [c for c in new_df.columns if c.startswith("Q")]
-        feat_cols = [c for c in q_cols if c != "Q30_Purchase_Likelihood"]
-
-        X_new = pd.get_dummies(new_df[feat_cols], drop_first=True)
-        missing = set(X.columns) - set(X_new.columns)
-        for c in missing:
-            X_new[c] = 0
-        X_new = X_new[X.columns]
-
-        new_df["Predicted_Buyer"] = rf_model.predict(X_new)
-        new_df["Probability"] = rf_model.predict_proba(X_new)[:, 1]
-
-        st.dataframe(new_df.head())
-
-        st.download_button(
-            "Download predictions",
-            new_df.to_csv(index=False),
-            "scored_customers.csv",
-            "text/csv"
+- `1` → Buyer  
+- `0` → Non-buyer
+"""
         )
+
+        new_file = st.file_uploader("Upload new customer CSV", type=["csv"], key="new_customers")
+
+        if new_file is not None:
+            new_df = pd.read_csv(new_file)
+
+            q_cols_new = [c for c in new_df.columns if c.startswith("Q")]
+            # Exclude purchase likelihood from features if accidentally present
+            feature_cols_new = [c for c in q_cols_new if c != "Q30_Purchase_Likelihood"]
+
+            X_new_raw = new_df[feature_cols_new]
+            X_new_enc = pd.get_dummies(X_new_raw, drop_first=True)
+
+            # Align columns with training data from classification
+            missing_cols = set(X_cls.columns) - set(X_new_enc.columns)
+            for c in missing_cols:
+                X_new_enc[c] = 0
+            X_new_enc = X_new_enc[X_cls.columns]
+
+            new_df["Predicted_Buyer_RF"] = rf_model.predict(X_new_enc)
+            if hasattr(rf_model, "predict_proba"):
+                new_df["Probability_RF"] = rf_model.predict_proba(X_new_enc)[:, 1]
+
+            st.subheader("Preview of Scored Customers")
+            st.dataframe(new_df.head())
+
+            csv_data = new_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Download Scored Customers as CSV",
+                data=csv_data,
+                file_name="scored_customers_with_predictions.csv",
+                mime="text/csv",
+            )
