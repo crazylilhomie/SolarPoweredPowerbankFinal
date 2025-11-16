@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LinearRegression
@@ -13,14 +13,18 @@ from sklearn.metrics import (
 )
 from sklearn.cluster import KMeans
 from sklearn.base import clone
+from sklearn.decomposition import PCA
 
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
 
 sns.set_style("whitegrid")
+
 
 # -----------------------------------------------------------------------------
 # Helper functions
@@ -262,7 +266,7 @@ Upload your survey data (600+ respondents) and explore:
 
 - **Classification** (Purchase likelihood: Buyer vs Non-buyer, with 5-fold CV)
 - **Association Rules** (Customer behaviour patterns)
-- **Clustering** (Customer segments and target segment)
+- **Clustering** (Customer segments and target segment with 3D visualization)
 - **Regression** (Price prediction)
 - **Scenario Scoring** (Label new customers)
 """
@@ -292,115 +296,172 @@ tabs = st.tabs([
     "🧪 Score New Customers",
 ])
 
+
 # -----------------------------------------------------------------------------
-# OVERVIEW TAB – 10 GRAPHS FROM REPORT
+# OVERVIEW TAB – PLOTLY INTERACTIVE GRAPHS
 # -----------------------------------------------------------------------------
 with tabs[0]:
-    st.header("📊 Descriptive Analytics – Key Graphs")
+    st.header("📊 Descriptive Analytics – Interactive Overview")
 
-    # Graph 1: Key Demographics (Gender & Location) – Pie Charts
-    st.subheader("Graph 1: Key Demographics (Gender & Location Type)")
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    # 1. Gender & Location – Donut Charts
+    col1, col2 = st.columns(2)
 
-    if "Q2_Gender" in df.columns:
-        gender_counts = df["Q2_Gender"].value_counts()
-        axes[0].pie(gender_counts.values, labels=gender_counts.index, autopct="%1.1f%%", startangle=90)
-        axes[0].set_title("Gender Distribution")
-    else:
-        axes[0].text(0.5, 0.5, "Q2_Gender not found", ha="center")
+    with col1:
+        st.subheader("Gender Distribution")
+        if "Q2_Gender" in df.columns:
+            gender_counts = df["Q2_Gender"].value_counts().reset_index()
+            gender_counts.columns = ["Gender", "Count"]
+            fig = px.pie(
+                gender_counts,
+                names="Gender",
+                values="Count",
+                hole=0.4,
+            )
+            fig.update_layout(margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Q2_Gender not found.")
 
-    if "Q3_Location_Type" in df.columns:
-        loc_counts = df["Q3_Location_Type"].value_counts()
-        axes[1].pie(loc_counts.values, labels=loc_counts.index, autopct="%1.1f%%", startangle=90)
-        axes[1].set_title("Location Type Distribution")
-    else:
-        axes[1].text(0.5, 0.5, "Q3_Location_Type not found", ha="center")
+    with col2:
+        st.subheader("Location Type Distribution")
+        if "Q3_Location_Type" in df.columns:
+            loc_counts = df["Q3_Location_Type"].value_counts().reset_index()
+            loc_counts.columns = ["Location_Type", "Count"]
+            fig = px.pie(
+                loc_counts,
+                names="Location_Type",
+                values="Count",
+                hole=0.4,
+            )
+            fig.update_layout(margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Q3_Location_Type not found.")
 
-    st.pyplot(fig)
-
-    # Graph 2: Heatmap - Purchase Likelihood vs Age Group
-    st.subheader("Graph 2: Heatmap – Purchase Likelihood vs Age Group")
+    # 2. Heatmap – Purchase Likelihood vs Age Group
+    st.subheader("Purchase Likelihood vs Age Group (Heatmap)")
     if "Q1_Age_Group" in df.columns and "Q30_Purchase_Likelihood" in df.columns:
         ct = pd.crosstab(df["Q1_Age_Group"], df["Q30_Purchase_Likelihood"])
-        fig, ax = plt.subplots(figsize=(8, 5))
-        sns.heatmap(ct, annot=True, fmt="d", cmap="YlOrRd", ax=ax)
-        ax.set_xlabel("Purchase Likelihood")
-        ax.set_ylabel("Age Group")
-        st.pyplot(fig)
+        fig = px.imshow(
+            ct,
+            text_auto=True,
+            labels=dict(x="Purchase Likelihood", y="Age Group", color="Count"),
+            aspect="auto",
+            color_continuous_scale="YlOrRd",
+        )
+        fig.update_layout(margin=dict(t=30, b=10, l=10, r=10))
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Required columns Q1_Age_Group and/or Q30_Purchase_Likelihood not found.")
+        st.info("Q1_Age_Group and/or Q30_Purchase_Likelihood not found.")
 
-    # Graph 3: Target Income Level Distribution – Vertical Bar
-    st.subheader("Graph 3: Target Income Level Distribution")
+    # 3. Income Distribution – Bar Chart
+    st.subheader("Annual Income Distribution")
     if "Q4_Annual_Income" in df.columns:
-        income_counts = df["Q4_Annual_Income"].value_counts().sort_index()
-        fig, ax = plt.subplots(figsize=(6, 4))
-        sns.barplot(x=income_counts.index, y=income_counts.values, ax=ax, palette="viridis")
-        ax.set_xlabel("Annual Income Bracket")
-        ax.set_ylabel("Number of Respondents")
-        plt.xticks(rotation=45, ha="right")
-        st.pyplot(fig)
+        income_counts = df["Q4_Annual_Income"].value_counts().sort_index().reset_index()
+        income_counts.columns = ["Income_Bracket", "Count"]
+        fig = px.bar(
+            income_counts,
+            x="Income_Bracket",
+            y="Count",
+            text="Count",
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            xaxis_title="Annual Income Bracket",
+            yaxis_title="Number of Respondents",
+            margin=dict(t=30, b=80, l=10, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Column Q4_Annual_Income not found.")
+        st.info("Q4_Annual_Income not found.")
 
-    # Graph 4: Preferred Power Bank Capacity – Vertical Bar
-    st.subheader("Graph 4: Preferred Power Bank Capacity")
+    # 4. Preferred Power Bank Capacity
+    st.subheader("Preferred Power Bank Capacity")
     if "Q28_Preferred_Capacity" in df.columns:
-        cap_counts = df["Q28_Preferred_Capacity"].value_counts().sort_index()
-        fig, ax = plt.subplots(figsize=(6, 4))
-        sns.barplot(x=cap_counts.index, y=cap_counts.values, ax=ax, palette="viridis")
-        ax.set_xlabel("Preferred Capacity (mAh range)")
-        ax.set_ylabel("Number of Respondents")
-        plt.xticks(rotation=45, ha="right")
-        st.pyplot(fig)
+        cap_counts = df["Q28_Preferred_Capacity"].value_counts().sort_index().reset_index()
+        cap_counts.columns = ["Capacity", "Count"]
+        fig = px.bar(
+            cap_counts,
+            x="Capacity",
+            y="Count",
+            text="Count",
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            xaxis_title="Preferred Capacity (mAh range)",
+            yaxis_title="Number of Respondents",
+            margin=dict(t=30, b=80, l=10, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Column Q28_Preferred_Capacity not found.")
+        st.info("Q28_Preferred_Capacity not found.")
 
-    # Graph 5: Preferred Purchase Channels – Horizontal Bar + Top 3
-    st.subheader("Graph 5: Preferred Purchase Channels")
+    # 5. Preferred Purchase Channels – Horizontal Bar + Top 3
+    st.subheader("Preferred Purchase Channels")
     if "Q29_Purchase_Channels" in df.columns:
         temp = df["Q29_Purchase_Channels"].dropna().astype(str).str.split("|").explode().str.strip()
-        channel_counts = temp.value_counts()
-        total = channel_counts.sum()
+        channel_counts = temp.value_counts().reset_index()
+        channel_counts.columns = ["Channel", "Count"]
+        total = channel_counts["Count"].sum()
 
-        fig, ax = plt.subplots(figsize=(6, 5))
-        sns.barplot(x=channel_counts.values, y=channel_counts.index, ax=ax, palette="viridis")
-        ax.set_xlabel("Number of Mentions")
-        ax.set_ylabel("Purchase Channel")
-        st.pyplot(fig)
+        fig = px.bar(
+            channel_counts,
+            x="Count",
+            y="Channel",
+            orientation="h",
+            text="Count",
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            xaxis_title="Number of Mentions",
+            yaxis_title="Purchase Channel",
+            margin=dict(t=30, b=20, l=100, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-        # Medal podium (Top 3)
         st.markdown("#### 🥇 Top 3 Purchase Channels")
-        for i, (ch, cnt) in enumerate(channel_counts.head(3).items(), start=1):
-            medal = "🥇" if i == 1 else ("🥈" if i == 2 else "🥉")
-            pct = (cnt / total) * 100 if total > 0 else 0
-            st.markdown(f"{medal} **{ch}** – {cnt} mentions ({pct:.1f}%)")
+        for i, row in channel_counts.head(3).iterrows():
+            rank = i + 1
+            medal = "🥇" if rank == 1 else ("🥈" if rank == 2 else "🥉")
+            pct = (row["Count"] / total * 100) if total > 0 else 0
+            st.markdown(f"{medal} **{row['Channel']}** – {row['Count']} mentions ({pct:.1f}%)")
     else:
-        st.info("Column Q29_Purchase_Channels not found.")
+        st.info("Q29_Purchase_Channels not found.")
 
-    # Graph 6: Most Popular Bundle Preferences – Horizontal Bar + Top 3
-    st.subheader("Graph 6: Most Popular Bundle Preferences")
+    # 6. Bundle Preferences – Horizontal Bar + Top 3
+    st.subheader("Bundle Preferences")
     if "Q32_Bundle_Preferences" in df.columns:
         temp = df["Q32_Bundle_Preferences"].dropna().astype(str).str.split("|").explode().str.strip()
-        bundle_counts = temp.value_counts()
-        total_b = bundle_counts.sum()
+        bundle_counts = temp.value_counts().reset_index()
+        bundle_counts.columns = ["Bundle", "Count"]
+        total_b = bundle_counts["Count"].sum()
 
-        fig, ax = plt.subplots(figsize=(6, 5))
-        sns.barplot(x=bundle_counts.values, y=bundle_counts.index, ax=ax, palette="viridis")
-        ax.set_xlabel("Number of Mentions")
-        ax.set_ylabel("Bundle Type")
-        st.pyplot(fig)
+        fig = px.bar(
+            bundle_counts,
+            x="Count",
+            y="Bundle",
+            orientation="h",
+            text="Count",
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(
+            xaxis_title="Number of Mentions",
+            yaxis_title="Bundle",
+            margin=dict(t=30, b=20, l=150, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("#### 🥇 Top 3 Bundles")
-        for i, (bndl, cnt) in enumerate(bundle_counts.head(3).items(), start=1):
-            medal = "🥇" if i == 1 else ("🥈" if i == 2 else "🥉")
-            pct = (cnt / total_b) * 100 if total_b > 0 else 0
-            st.markdown(f"{medal} **{bndl}** – {cnt} mentions ({pct:.1f}%)")
+        for i, row in bundle_counts.head(3).iterrows():
+            rank = i + 1
+            medal = "🥇" if rank == 1 else ("🥈" if rank == 2 else "🥉")
+            pct = (row["Count"] / total_b * 100) if total_b > 0 else 0
+            st.markdown(f"{medal} **{row['Bundle']}** – {row['Count']} mentions ({pct:.1f}%)")
     else:
-        st.info("Column Q32_Bundle_Preferences not found.")
+        st.info("Q32_Bundle_Preferences not found.")
 
-    # Graph 7: Heatmap – Top Features vs Primary Use Case
-    st.subheader("Graph 7: Heatmap – Top Features vs Primary Use Case")
+    # 7. Heatmap – Features vs Primary Use Case
+    st.subheader("Top Features vs Primary Use Case (Heatmap)")
     if "Q25_Important_Features" in df.columns and "Q26_Primary_Use_Case" in df.columns:
         df_feat = df[["Q25_Important_Features", "Q26_Primary_Use_Case"]].dropna()
         all_features = (
@@ -422,28 +483,38 @@ with tabs[0]:
                 if f in top5_features:
                     heat_data.loc[f, uc] += 1
 
-        fig, ax = plt.subplots(figsize=(8, 5))
-        sns.heatmap(heat_data, annot=True, cmap="YlGnBu", fmt="d", ax=ax)
-        ax.set_xlabel("Primary Use Case")
-        ax.set_ylabel("Top Features")
-        st.pyplot(fig)
+        fig = px.imshow(
+            heat_data,
+            labels=dict(x="Primary Use Case", y="Top Features", color="Count"),
+            text_auto=True,
+            aspect="auto",
+            color_continuous_scale="YlGnBu",
+        )
+        fig.update_layout(margin=dict(t=30, b=10, l=10, r=10))
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Columns Q25_Important_Features and/or Q26_Primary_Use_Case not found.")
+        st.info("Q25_Important_Features and/or Q26_Primary_Use_Case not found.")
 
-    # Graph 8: Employment Status vs Price Willingness – Boxplot
-    st.subheader("Graph 8: Employment Status vs Willingness to Pay (Boxplot)")
+    # 8. Employment vs Price – Boxplot
+    st.subheader("Employment Status vs Willingness to Pay")
     if "Q6_Employment_Status" in df.columns and "Price_numeric" in df.columns:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        sns.boxplot(x="Q6_Employment_Status", y="Price_numeric", data=df, ax=ax)
-        ax.set_xlabel("Employment Status")
-        ax.set_ylabel("Max Price Willing to Pay (USD)")
-        plt.xticks(rotation=45, ha="right")
-        st.pyplot(fig)
+        fig = px.box(
+            df.dropna(subset=["Q6_Employment_Status", "Price_numeric"]),
+            x="Q6_Employment_Status",
+            y="Price_numeric",
+            points="all",
+        )
+        fig.update_layout(
+            xaxis_title="Employment Status",
+            yaxis_title="Max Price Willing to Pay (USD)",
+            margin=dict(t=30, b=80, l=10, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Columns Q6_Employment_Status and/or Price_numeric not found.")
+        st.info("Q6_Employment_Status and/or Price_numeric not found.")
 
-    # Graph 9: Household Size vs Bundle Preference – Grouped Bar Chart
-    st.subheader("Graph 9: Household Size vs Top Bundle Preferences")
+    # 9. Household Size vs Bundle Preferences – Grouped Bar
+    st.subheader("Household Size vs Top Bundle Preferences")
     if "Q36_Household_Size" in df.columns and "Q32_Bundle_Preferences" in df.columns:
         temp = df[["Q36_Household_Size", "Q32_Bundle_Preferences"]].dropna()
         temp = temp.assign(Bundle=temp["Q32_Bundle_Preferences"].astype(str).str.split("|")).explode("Bundle")
@@ -451,63 +522,52 @@ with tabs[0]:
         top5_bundles = temp["Bundle"].value_counts().head(5).index
         temp = temp[temp["Bundle"].isin(top5_bundles)]
 
-        pivot = pd.pivot_table(
-            temp,
-            index="Q36_Household_Size",
-            columns="Bundle",
-            aggfunc="size",
-            fill_value=0
+        pivot = temp.groupby(["Q36_Household_Size", "Bundle"]).size().reset_index(name="Count")
+        fig = px.bar(
+            pivot,
+            x="Q36_Household_Size",
+            y="Count",
+            color="Bundle",
+            barmode="group",
         )
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        pivot.plot(kind="bar", ax=ax)
-        ax.set_xlabel("Household Size")
-        ax.set_ylabel("Number of Mentions")
-        plt.xticks(rotation=0)
-        st.pyplot(fig)
+        fig.update_layout(
+            xaxis_title="Household Size",
+            yaxis_title="Number of Mentions",
+            margin=dict(t=30, b=40, l=10, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Columns Q36_Household_Size and/or Q32_Bundle_Preferences not found.")
+        st.info("Q36_Household_Size and/or Q32_Bundle_Preferences not found.")
 
-    # Graph 10: Gender vs Feature Preferences – Butterfly Chart
-    st.subheader("Graph 10: Gender vs Feature Preferences (Butterfly Chart)")
+    # 10. Gender vs Feature Preferences – Butterfly-style using grouped bars
+    st.subheader("Gender vs Feature Preferences")
     if "Q2_Gender" in df.columns and "Q25_Important_Features" in df.columns:
         temp = df[["Q2_Gender", "Q25_Important_Features"]].dropna()
         temp = temp.assign(Feature=temp["Q25_Important_Features"].astype(str).str.split("|")).explode("Feature")
         temp["Feature"] = temp["Feature"].str.strip()
-
-        # focus on Male/Female
         temp = temp[temp["Q2_Gender"].isin(["Male", "Female"])]
+
         overall_top = temp["Feature"].value_counts().head(10).index
+        temp = temp[temp["Feature"].isin(overall_top)]
+        pivot = temp.groupby(["Feature", "Q2_Gender"]).size().reset_index(name="Count")
 
-        gender_feat = (
-            temp[temp["Feature"].isin(overall_top)]
-            .groupby(["Feature", "Q2_Gender"])
-            .size()
-            .unstack(fill_value=0)
+        fig = px.bar(
+            pivot,
+            x="Count",
+            y="Feature",
+            color="Q2_Gender",
+            barmode="group",
+            orientation="h",
         )
-
-        # Ensure both columns exist
-        for g in ["Male", "Female"]:
-            if g not in gender_feat.columns:
-                gender_feat[g] = 0
-
-        gender_feat = gender_feat.loc[overall_top]  # keep order
-
-        male_counts = gender_feat["Male"].values
-        female_counts = gender_feat["Female"].values
-
-        y = np.arange(len(overall_top))
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.barh(y, male_counts, color="#1f77b4", label="Male")
-        ax.barh(y, -female_counts, color="#ff7f0e", label="Female")
-        ax.set_yticks(y)
-        ax.set_yticklabels(overall_top)
-        ax.axvline(0, color="black")
-        ax.set_xlabel("Mentions (Male right / Female left)")
-        ax.legend()
-        st.pyplot(fig)
+        fig.update_layout(
+            xaxis_title="Number of Mentions",
+            yaxis_title="Feature",
+            margin=dict(t=30, b=40, l=150, r=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Columns Q2_Gender and/or Q25_Important_Features not found.")
+        st.info("Q2_Gender and/or Q25_Important_Features not found.")
+
 
 # -----------------------------------------------------------------------------
 # Classification Tab – 5-FOLD CROSS-VALIDATION
@@ -520,7 +580,6 @@ with tabs[1]:
     else:
         X_cls, y_cls, cls_features, cls_encoded_cols = prepare_classification_data(df, buyer_col)
 
-        # 5-fold CV for each model
         dt_model, dt_metrics = crossval_evaluate(
             DecisionTreeClassifier(max_depth=5, random_state=42),
             X_cls, y_cls,
@@ -552,12 +611,17 @@ with tabs[1]:
         pref_series = compute_preference_importance(df)
         if pref_series is not None:
             top_prefs = pref_series.head(20)
-            fig, ax = plt.subplots(figsize=(8, 6))
-            sns.barplot(x=top_prefs.values, y=top_prefs.index, palette="viridis", ax=ax)
-            ax.set_xlabel("Number of Mentions in Survey")
-            ax.set_ylabel("")
-            ax.set_title("Top 20 Preferred Features / Motivators / Brands")
-            st.pyplot(fig)
+            fig = px.bar(
+                x=top_prefs.values,
+                y=top_prefs.index,
+                orientation="h",
+                labels={"x": "Mentions", "y": ""},
+            )
+            fig.update_layout(
+                title="Top 20 Preferred Features / Motivators / Brands",
+                margin=dict(t=40, b=10, l=150, r=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Could not compute preferences (check Q25, Q28, Q34, Q35).")
 
@@ -569,15 +633,23 @@ with tabs[1]:
                 "Importance": importances,
             }).sort_values(by="Importance", ascending=False).head(20)
 
-            fig, ax = plt.subplots(figsize=(8, 6))
-            sns.barplot(data=fi_df, x="Importance", y="Feature", ax=ax)
-            ax.set_title("Top 20 Features Driving the Model")
-            st.pyplot(fig)
+            fig = px.bar(
+                fi_df,
+                x="Importance",
+                y="Feature",
+                orientation="h",
+            )
+            fig.update_layout(
+                title="Top 20 Features Driving the Model",
+                margin=dict(t=40, b=10, l=200, r=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         st.markdown(
             "The **Random Forest** model above (trained with 5-fold CV and then on full data) "
             "will be used for scoring new customers in the **Score New Customers** tab."
         )
+
 
 # -----------------------------------------------------------------------------
 # Association Rules Tab – Simplified Insights
@@ -607,7 +679,8 @@ with tabs[2]:
         min_support = st.slider("Minimum support", 0.01, 0.2, 0.05, step=0.01)
         min_lift = st.slider("Minimum lift", 0.8, 3.0, 1.0, step=0.1)
 
-        trans_df, rules = run_association_rules(df, multi_cols, min_support=min_support, metric="lift", min_threshold=min_lift)
+        trans_df, rules = run_association_rules(df, multi_cols, min_support=min_support,
+                                                metric="lift", min_threshold=min_lift)
 
         if rules is None or rules.empty:
             st.warning("No association rules found with current thresholds. Try lowering minimum support/lift.")
@@ -632,15 +705,20 @@ with tabs[2]:
             with st.expander("📋 See raw rule table (advanced)"):
                 display_cols = ["antecedents", "consequents", "support", "confidence", "lift"]
                 rules_display = rules[display_cols].copy()
-                rules_display["antecedents"] = rules_display["antecedents"].apply(lambda x: ", ".join(list(x)))
-                rules_display["consequents"] = rules_display["consequents"].apply(lambda x: ", ".join(list(x)))
+                rules_display["antecedents"] = rules_display["antecedents"].apply(
+                    lambda x: ", ".join(list(x))
+                )
+                rules_display["consequents"] = rules_display["consequents"].apply(
+                    lambda x: ", ".join(list(x))
+                )
                 st.dataframe(rules_display)
 
+
 # -----------------------------------------------------------------------------
-# Clustering Tab – Elbow + Simple Demographics
+# Clustering Tab – Elbow + PCA 3D Scatter
 # -----------------------------------------------------------------------------
 with tabs[3]:
-    st.header("👥 Customer Segmentation (K-Means)")
+    st.header("👥 Customer Segmentation (K-Means with 3D PCA Visualization)")
 
     cluster_vars = [
         "Q1_Age_Group",
@@ -674,12 +752,16 @@ with tabs[3]:
             km.fit(X_cluster)
             sse.append(km.inertia_)
 
-        fig, ax = plt.subplots()
-        ax.plot(K_range, sse, marker="o")
-        ax.set_xlabel("Number of clusters (K)")
-        ax.set_ylabel("SSE (Within-cluster sum of squares)")
-        ax.set_title("Elbow Plot for K-Means")
-        st.pyplot(fig)
+        elbow_df = pd.DataFrame({"K": list(K_range), "SSE": sse})
+        fig_elbow = px.line(
+            elbow_df,
+            x="K",
+            y="SSE",
+            markers=True,
+            title="Elbow Plot for K-Means",
+        )
+        fig_elbow.update_layout(margin=dict(t=50, b=10, l=10, r=10))
+        st.plotly_chart(fig_elbow, use_container_width=True)
 
         k_choice = st.slider("Select number of clusters for segmentation", 2, 8, 4)
 
@@ -688,18 +770,43 @@ with tabs[3]:
 
         # Merge cluster labels back into main df by index
         df = df.copy()
-        df["Cluster"] = df_cluster["Cluster"]
+        df.loc[df_cluster.index, "Cluster"] = df_cluster["Cluster"]
 
         st.subheader("Cluster Performance Summary")
         cluster_summary, best_cluster = summarize_clusters(df)
         st.dataframe(cluster_summary)
 
-        st.markdown(f"### 🎯 Recommended Early-Target Cluster: **Cluster {best_cluster}**")
+        st.markdown(f"### 🎯 Recommended Early-Target Cluster: **Cluster {int(best_cluster)}**")
 
         st.markdown(
             "This cluster has the **highest buyer rate** (proportion of Buyer = 1), "
             "so it is statistically the easiest early-win target segment."
         )
+
+        # PCA for 3D visualization
+        st.subheader("🎨 3D PCA Scatter Plot of Clusters")
+
+        pca = PCA(n_components=3, random_state=42)
+        pcs = pca.fit_transform(X_cluster)
+        pca_df = pd.DataFrame(pcs, columns=["PC1", "PC2", "PC3"], index=df_cluster.index)
+        df_cluster_pca = df_cluster.join(pca_df)
+
+        hover_cols = []
+        for c in ["Q1_Age_Group", "Q2_Gender", "Q4_Annual_Income"]:
+            if c in df_cluster_pca.columns:
+                hover_cols.append(c)
+
+        fig_3d = px.scatter_3d(
+            df_cluster_pca,
+            x="PC1",
+            y="PC2",
+            z="PC3",
+            color="Cluster",
+            hover_data=hover_cols,
+            title="3D PCA View of Customer Segments",
+        )
+        fig_3d.update_layout(margin=dict(t=50, b=10, l=10, r=10))
+        st.plotly_chart(fig_3d, use_container_width=True)
 
         st.subheader("📌 Cluster Demographics (Most Common Values)")
         demo_cols = ["Q1_Age_Group", "Q2_Gender", "Q3_Location_Type"]
@@ -713,12 +820,6 @@ with tabs[3]:
         else:
             st.info("No demographic columns found to summarize.")
 
-        st.subheader("Cluster Size Distribution")
-        fig, ax = plt.subplots()
-        sns.countplot(x=df["Cluster"], ax=ax)
-        ax.set_xlabel("Cluster")
-        ax.set_ylabel("Number of customers")
-        st.pyplot(fig)
 
 # -----------------------------------------------------------------------------
 # Regression Tab
@@ -758,6 +859,7 @@ with tabs[4]:
             )
         else:
             st.info("Could not compute recommended price (no buyer or price info).")
+
 
 # -----------------------------------------------------------------------------
 # Score New Customers Tab
